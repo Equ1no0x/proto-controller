@@ -67,6 +67,10 @@ extends CharacterBody3D
 ## Speed at which you descend faster when releasing input mid-air (multiplier to gravity).
 ## 1.0 = normal gravity, 2.0 = double gravity when no input. Set to 1.0 to disable.
 @export var no_input_gravity_multiplier : float = 1.5
+## How much momentum can be redirected toward camera forward direction while airborne.
+## 0.0 = keep jump direction momentum, 1.0 = fully redirect to camera look, values between blend both.
+## Only applies during momentum preservation window after jumping while moving.
+@export_range(0.0, 1.0) var momentum_redirect_to_camera : float = 0.5
 
 
 @export_group("Landing")
@@ -263,6 +267,8 @@ func _physics_process(delta: float) -> void:
 					if jump_start_speed > 0.1 and max_air_turn_angle < 180.0:
 						var jump_dir := jump_start_horizontal_velocity.normalized()
 						var angle_to_jump := rad_to_deg(acos(clamp(move_dir.dot(jump_dir), -1.0, 1.0)))
+						var target_speed : float
+						var max_air_speed : float
 						if angle_to_jump > max_air_turn_angle:
 							# Clamp input direction to max allowed angle from jump direction
 							var max_angle_rad := deg_to_rad(max_air_turn_angle)
@@ -289,8 +295,24 @@ func _physics_process(delta: float) -> void:
 					# This is the KEY to preventing velocity boosting (UE approach)
 					var max_air_speed := max(walk_speed, jump_start_speed)
 					
-					# Apply lateral acceleration toward move_dir
-					var current_speed_in_dir := velocity.dot(move_dir)
+					# Determine acceleration direction based on jump type
+					var accel_direction := move_dir
+					
+					# MOVING JUMP: Redirect momentum toward camera forward based on setting
+					if not was_stationary_jump and momentum_preserve_timer > 0.0:
+						if momentum_redirect_to_camera > 0.0:
+							# Get current camera forward direction (updated every frame)
+							var current_camera_forward := -cameraController.global_transform.basis.z
+							var camera_forward_horizontal := Vector3(current_camera_forward.x, 0, current_camera_forward.z).normalized()
+							
+							if camera_forward_horizontal.length() > 0.01:
+								# Blend between jump start direction and current camera forward direction
+								var jump_dir := jump_start_horizontal_velocity.normalized()
+								# Use slerp for smooth blending between directions
+								accel_direction = jump_dir.slerp(camera_forward_horizontal, momentum_redirect_to_camera).normalized()
+					
+					# Apply lateral acceleration toward acceleration direction
+					var current_speed_in_dir := velocity.dot(accel_direction)
 					var add_speed := target_speed - current_speed_in_dir
 					
 					if add_speed > 0.0:
@@ -298,7 +320,7 @@ func _physics_process(delta: float) -> void:
 						var accel_amount := walk_speed * 10.0 * effective_air_control * delta
 						accel_amount = min(accel_amount, add_speed)
 						
-						var new_velocity: Vector3 = velocity + move_dir * accel_amount
+						var new_velocity: Vector3 = velocity + accel_direction * accel_amount
 						var new_horizontal := Vector3(new_velocity.x, 0, new_velocity.z)
 						
 						# CRITICAL: Clamp total horizontal speed to max_air_speed
@@ -339,9 +361,9 @@ func _physics_process(delta: float) -> void:
 							# Apply additional gravity to make player fall faster
 							var extra_gravity: Vector3 = get_gravity() * (no_input_gravity_multiplier - 1.0)
 							velocity += extra_gravity * delta
-	else:
-		velocity.x = 0
-		velocity.z = 0
+			else:
+				velocity.x = 0
+				velocity.z = 0
 
 	# Use velocity to actually move
 	var was_in_air := not is_on_floor()
