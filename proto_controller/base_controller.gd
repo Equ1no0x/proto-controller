@@ -105,6 +105,7 @@ var nocliping : bool = false
 
 ## Tracking for air control logic
 var jump_start_horizontal_velocity : Vector3 = Vector3.ZERO  # Stored at jump to prevent speed boosting
+var jump_direction : Vector3 = Vector3.ZERO  # World direction at jump time (updated with camera rotation)
 var time_since_jump : float = 0.0  # Tracks time in air for stationary jump curve
 var was_stationary_jump : bool = false  # Did we jump from standstill?
 var momentum_preserve_timer : float = 0.0  # Timer for momentum preservation after moving jump
@@ -185,9 +186,14 @@ func _physics_process(delta: float) -> void:
 			if jump_start_speed < 0.1:
 				was_stationary_jump = true
 				time_since_jump = 0.0
+				jump_direction = Vector3.ZERO
 			else:
 				was_stationary_jump = false
 				momentum_preserve_timer = momentum_preserve_time
+				# Store jump direction in LOCAL space (relative to character basis at jump time)
+				# This allows it to be transformed by current basis later to follow camera rotation
+				var world_jump_dir := jump_start_horizontal_velocity.normalized()
+				jump_direction = transform.basis.inverse() * world_jump_dir
 			
 			# Apply vertical jump impulse without modifying horizontal velocity
 			velocity.y = jump_velocity
@@ -267,8 +273,6 @@ func _physics_process(delta: float) -> void:
 					if jump_start_speed > 0.1 and max_air_turn_angle < 180.0:
 						var jump_dir := jump_start_horizontal_velocity.normalized()
 						var angle_to_jump := rad_to_deg(acos(clamp(move_dir.dot(jump_dir), -1.0, 1.0)))
-						var target_speed : float
-						var max_air_speed : float
 						if angle_to_jump > max_air_turn_angle:
 							# Clamp input direction to max allowed angle from jump direction
 							var max_angle_rad := deg_to_rad(max_air_turn_angle)
@@ -291,51 +295,81 @@ func _physics_process(delta: float) -> void:
 							# After momentum expires: fall back to walk_speed control
 							target_speed = walk_speed * effective_air_control
 					
-					# Calculate max speed cap: can't exceed walk_speed OR jump start speed
-					# This is the KEY to preventing velocity boosting (UE approach)
-					var max_air_speed := max(walk_speed, jump_start_speed)
+				# Calculate max speed cap: can't exceed walk_speed OR jump start speed
+				# This is the KEY to preventing velocity boosting (UE approach)
+				var max_air_speed := max(walk_speed, jump_start_speed)
+				
+				# Determine acceleration direction
+				var accel_direction := move_dir
+				
+				# MOVING JUMP: Blend input direction with camera-rotated jump direction
+				# This makes momentum follow camera rotation while still allowing input override
+				if not was_stationary_jump and momentum_preserve_timer > 0.0:
+					if momentum_redirect_to_camera > 0.0 and jump_direction.length() > 0.01:
+						# Transform jump direction by current character basis (which rotates with camera)
+						var camera_relative_jump_dir := (transform.basis * jump_direction).normalized()
+						# Blend: 0.0 = full player control, 1.0 = full momentum preservation
+						accel_direction = move_dir.lerp(camera_relative_jump_dir, momentum_redirect_to_camera).normalized()
+				
+				# Apply acceleration with proper speed checking to prevent over-acceleration
+				# Calculate how much speed we can add in the desired direction
+				var current_horizontal := Vector3(velocity.x, 0, velocity.z)
+				var current_horizontal_speed := current_horizontal.length()
+				
+				# Target speed is limited by air control effectiveness
+				var target_speed: float = walk_speed * effective_air_control
+				var speed_cap: float = walk_speed  # Default cap for stationary jumps
+				
+				if not was_stationary_jump and momentum_preserve_timer > 0.0:
+					# During momentum preservation, we can maintain up to jump start speed
+					target_speed = jump_start_speed
+					speed_cap = jump_start_speed
+				
+				# Apply acceleration in input direction (true tug of war)
+				# Always apply force toward input, speed cap prevents exceeding limits
+				var accel_amount := walk_speed * 10.0 * effective_air_control * delta
+				
+				var new_velocity: Vector3 = velocity + accel_direction * accel_amount
+				var new_horizontal := Vector3(new_velocity.x, 0, new_velocity.z)
+				var new_horizontal_speed := new_horizontal.length()
+				
+				# Check if we're accelerating in the same direction as current velocity
+				# Only apply speed cap if we're speeding up (not changing direction)
+				# If current speed > 0.1, check if we're accelerating in same direction
+				if current_horizontal_speed > 0.1:
+					var current_dir := current_horizontal.normalized()
+					var accel_alignment := accel_direction.dot(current_dir)
 					
-					# Determine acceleration direction based on jump type
-					var accel_direction := move_dir
-					
-					# MOVING JUMP: Redirect momentum toward camera forward based on setting
-					if not was_stationary_jump and momentum_preserve_timer > 0.0:
-						if momentum_redirect_to_camera > 0.0:
-							# Get current camera forward direction (updated every frame)
-							var current_camera_forward := -cameraController.global_transform.basis.z
-							var camera_forward_horizontal := Vector3(current_camera_forward.x, 0, current_camera_forward.z).normalized()
-							
-							if camera_forward_horizontal.length() > 0.01:
-								# Blend between jump start direction and current camera forward direction
-								var jump_dir := jump_start_horizontal_velocity.normalized()
-								# Use slerp for smooth blending between directions
-								accel_direction = jump_dir.slerp(camera_forward_horizontal, momentum_redirect_to_camera).normalized()
-					
-					# Apply lateral acceleration toward acceleration direction
-					var current_speed_in_dir := velocity.dot(accel_direction)
-					var add_speed := target_speed - current_speed_in_dir
-					
-					if add_speed > 0.0:
-						# Use max acceleration scaled by air control as acceleration rate
-						var accel_amount := walk_speed * 10.0 * effective_air_control * delta
-						accel_amount = min(accel_amount, add_speed)
-						
-						var new_velocity: Vector3 = velocity + accel_direction * accel_amount
-						var new_horizontal := Vector3(new_velocity.x, 0, new_velocity.z)
-						
-						# CRITICAL: Clamp total horizontal speed to max_air_speed
-						# This prevents velocity boosting when jumping while moving
-						if new_horizontal.length() <= max_air_speed:
-							velocity = new_velocity
-							
+					# If accelerating in same direction (alignment > 0.5) and would exceed cap, clamp
+					if accel_alignment > 0.5 and new_horizontal_speed > speed_cap:
+						var scale: float = speed_cap / new_horizontal_speed
+						velocity.x = new_horizontal.x * scale
+						velocity.z = new_horizontal.z * scale
+					else:
+						# Changing direction or slowing down - allow it
+						velocity = new_velocity
+				else:
+					# Starting from standstill - apply cap
+					if new_horizontal_speed <= speed_cap:
+						velocity = new_velocity
+					else:
+						var scale: float = speed_cap / new_horizontal_speed
+						velocity.x = new_horizontal.x * scale
+						velocity.z = new_horizontal.z * scale
+				
 				# Apply falling lateral friction (velocity-dependent drag)
+				# Friction only applies to existing velocity, reducing it over time
+				# Scaled as a fraction of current speed to avoid hard braking
 				if falling_lateral_friction > 0.0:
-					var friction_amount := falling_lateral_friction * horizontal_speed * delta
-					if horizontal_speed > 0.0:
-						var friction_dir := horizontal_vel.normalized()
-						var new_speed := max(horizontal_speed - friction_amount, 0.0)
-						velocity.x = friction_dir.x * new_speed
-						velocity.z = friction_dir.z * new_speed
+					var friction_horizontal := Vector3(velocity.x, 0, velocity.z)
+					var friction_horizontal_speed := friction_horizontal.length()
+					if friction_horizontal_speed > 0.01:
+						# Reduce horizontal speed by friction amount (scales with current speed)
+						var friction_amount := falling_lateral_friction * friction_horizontal_speed * delta
+						var new_speed := max(friction_horizontal_speed - friction_amount, 0.0)
+						var friction_scale: float = new_speed / friction_horizontal_speed if friction_horizontal_speed > 0.0 else 0.0
+						velocity.x *= friction_scale
+						velocity.z *= friction_scale
 		else:
 			# No input: apply braking deceleration
 			var horizontal_vel := Vector3(velocity.x, 0, velocity.z)
