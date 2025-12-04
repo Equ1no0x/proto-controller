@@ -1,7 +1,6 @@
-# ProtoController v1.0 by Brackeys
+# proto_controller.gd v1.0 by Brackeys, modified by Nox
 # CC0 License
 # Intended for rapid prototyping of first-person games.
-# Happy prototyping!
 
 extends CharacterBody3D
 
@@ -12,9 +11,9 @@ extends CharacterBody3D
 ## Can we press to jump?
 @export var can_jump : bool = true
 ## Can we hold to run?
-@export var can_sprint : bool = false
-## Can we press to enter freefly mode (noclip)?
-@export var can_freefly : bool = false
+@export var can_sprint : bool = true
+## Can we press to enter noclip mode (noclip)?
+@export var can_noclip : bool = false
 
 @export_group("Speeds")
 ## Look around rotation speed.
@@ -25,8 +24,8 @@ extends CharacterBody3D
 @export var jump_velocity : float = 4.5
 ## How fast do we run?
 @export var sprint_speed : float = 10.0
-## How fast do we freefly?
-@export var freefly_speed : float = 25.0
+## How fast do we NoClip?
+@export var noclip_speed : float = 25.0
 
 @export_group("Input Actions")
 ## Name of Input Action to move Left.
@@ -41,22 +40,22 @@ extends CharacterBody3D
 @export var input_jump : String = "ui_accept"
 ## Name of Input Action to Sprint.
 @export var input_sprint : String = "sprint"
-## Name of Input Action to toggle freefly mode.
-@export var input_freefly : String = "freefly"
+## Name of Input Action to toggle NoClip mode.
+@export var input_noclip : String = "noclip"
 
 var mouse_captured : bool = false
 var look_rotation : Vector2
 var move_speed : float = 0.0
-var freeflying : bool = false
+var nocliping : bool = false
 
 ## IMPORTANT REFERENCES
-@onready var head: Node3D = $Head
-@onready var collider: CollisionShape3D = $Collider
+@onready var cameraController: Node3D = $cameraController
+@onready var collider: CollisionShape3D = $collider
 
 func _ready() -> void:
 	check_input_mappings()
 	look_rotation.y = rotation.y
-	look_rotation.x = head.rotation.x
+	look_rotation.x = cameraController.rotation.x
 
 func _unhandled_input(event: InputEvent) -> void:
 	# Mouse capturing
@@ -69,19 +68,19 @@ func _unhandled_input(event: InputEvent) -> void:
 	if mouse_captured and event is InputEventMouseMotion:
 		rotate_look(event.relative)
 	
-	# Toggle freefly mode
-	if can_freefly and Input.is_action_just_pressed(input_freefly):
-		if not freeflying:
-			enable_freefly()
+	# Toggle noclip mode
+	if can_noclip and Input.is_action_just_pressed(input_noclip):
+		if not nocliping:
+			enable_noclip()
 		else:
-			disable_freefly()
+			disable_noclip()
 
 func _physics_process(delta: float) -> void:
-	# If freeflying, handle freefly and nothing else
-	if can_freefly and freeflying:
+	# If nocliping, handle noclip and nothing else
+	if can_noclip and nocliping:
 		var input_dir := Input.get_vector(input_left, input_right, input_forward, input_back)
-		var motion := (head.global_basis * Vector3(input_dir.x, 0, input_dir.y)).normalized()
-		motion *= freefly_speed * delta
+		var motion := (cameraController.global_basis * Vector3(input_dir.x, 0, input_dir.y)).normalized()
+		motion *= noclip_speed * delta
 		move_and_collide(motion)
 		return
 	
@@ -109,6 +108,7 @@ func _physics_process(delta: float) -> void:
 			velocity.x = move_dir.x * move_speed
 			velocity.z = move_dir.z * move_speed
 		else:
+			# Slow to a stop when no input
 			velocity.x = move_toward(velocity.x, 0, move_speed)
 			velocity.z = move_toward(velocity.z, 0, move_speed)
 	else:
@@ -128,24 +128,23 @@ func rotate_look(rot_input : Vector2):
 	look_rotation.y -= rot_input.x * look_speed
 	transform.basis = Basis()
 	rotate_y(look_rotation.y)
-	head.transform.basis = Basis()
-	head.rotate_x(look_rotation.x)
+	cameraController.transform.basis = Basis()
+	cameraController.rotate_x(look_rotation.x)
 
-
-func enable_freefly():
+## Disable clipping movement vectors
+func enable_noclip():
 	collider.disabled = true
-	freeflying = true
+	nocliping = true
 	velocity = Vector3.ZERO
 
-func disable_freefly():
+## Enable clipping movement vectors
+func disable_noclip():
 	collider.disabled = false
-	freeflying = false
-
+	nocliping = false
 
 func capture_mouse():
 	Input.set_mouse_mode(Input.MOUSE_MODE_CAPTURED)
 	mouse_captured = true
-
 
 func release_mouse():
 	Input.set_mouse_mode(Input.MOUSE_MODE_VISIBLE)
@@ -173,6 +172,6 @@ func check_input_mappings():
 	if can_sprint and not InputMap.has_action(input_sprint):
 		push_error("Sprinting disabled. No InputAction found for input_sprint: " + input_sprint)
 		can_sprint = false
-	if can_freefly and not InputMap.has_action(input_freefly):
-		push_error("Freefly disabled. No InputAction found for input_freefly: " + input_freefly)
-		can_freefly = false
+	if can_noclip and not InputMap.has_action(input_noclip):
+		push_error("noclip disabled. No InputAction found for input_noclip: " + input_noclip)
+		can_noclip = false
